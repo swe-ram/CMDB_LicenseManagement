@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app import app
 from auth.session import AuthenticatedPrincipal, get_current_principal
+from database.approver_repository import ensure_default_approvers
 from database.database import Base, get_db
 from database.models import (
     Application,
@@ -21,6 +22,10 @@ from database.models import (
     LicenseApproval,
     LicenseRequest,
     User,
+    APPROVAL_STAGE_IT_LICENSE_PROVISIONING,
+    APPROVAL_STAGE_TOWER_HEAD,
+    APPROVAL_STATUS_NOT_STARTED,
+    APPROVAL_STATUS_PENDING,
 )
 
 
@@ -80,12 +85,32 @@ class LicenseRequestApiTests(unittest.TestCase):
                 active=True,
             )
         )
+        # Seed the globally configured two-stage approvers used by the workflow.
+        ensure_default_approvers(self.db)
         self.db.commit()
 
         self.principal = AuthenticatedPrincipal(
             object_id=self.employee.external_user_id,
             roles=frozenset({"License.Requester"}),
             claims={},
+        )
+        # Approver principals are authorized by email against the configured
+        # approver tables.
+        self.tower_head_principal = AuthenticatedPrincipal(
+            object_id="approver:akshayap@clouddestinations.com",
+            roles=frozenset(),
+            claims={
+                "account_type": "approver",
+                "preferred_username": "akshayap@clouddestinations.com",
+            },
+        )
+        self.provisioning_principal = AuthenticatedPrincipal(
+            object_id="approver:jerryj@clouddestinations.com",
+            roles=frozenset(),
+            claims={
+                "account_type": "approver",
+                "preferred_username": "jerryj@clouddestinations.com",
+            },
         )
         app.dependency_overrides[get_db] = self._get_db
         app.dependency_overrides[get_current_principal] = lambda: self.principal
@@ -123,8 +148,15 @@ class LicenseRequestApiTests(unittest.TestCase):
         self.assertEqual(first.json()["request_id"], retry.json()["request_id"])
         self.assertTrue(first.json()["request_id"].startswith("LIC-"))
         self.assertEqual(first.json()["status"], "Pending Approval")
+        # Exactly one request and two stage approvals are created.
         self.assertEqual(self.db.query(LicenseRequest).count(), 1)
-        self.assertEqual(self.db.query(LicenseApproval).count(), 1)
+        self.assertEqual(self.db.query(LicenseApproval).count(), 2)
+        self.assertEqual(
+            first.json()["tower_head_status"], APPROVAL_STATUS_PENDING
+        )
+        self.assertEqual(
+            first.json()["provisioning_status_stage"], APPROVAL_STATUS_NOT_STARTED
+        )
 
         another = self.client.post(
             "/api/v1/license-requests",
@@ -162,32 +194,36 @@ class LicenseRequestApiTests(unittest.TestCase):
         )
         request_id = response.json()["request_id"]
 
+        # An unrelated authenticated principal cannot decide the Tower Head stage.
         self.principal = AuthenticatedPrincipal(
             object_id=self.outsider.external_user_id,
             roles=frozenset({"License.Approver"}),
-            claims={},
+            claims={"preferred_username": self.outsider.email},
         )
         unauthorized = self.client.post(
-            f"/api/v1/license-requests/{request_id}/decision",
+            f"/api/v1/license-requests/{request_id}/tower-head/decision",
             json={"decision": "Approved"},
         )
         self.assertEqual(unauthorized.status_code, 403)
 
-        self.principal = AuthenticatedPrincipal(
-            object_id=self.approver.external_user_id,
-            roles=frozenset({"License.Approver"}),
-            claims={},
-        )
+        # The configured Tower Head approver can decide and activates the
+        # provisioning stage.
+        self.principal = self.tower_head_principal
         approved = self.client.post(
-            f"/api/v1/license-requests/{request_id}/decision",
+            f"/api/v1/license-requests/{request_id}/tower-head/decision",
             json={"decision": "Approved", "comments": "Approved for current project."},
         )
         self.assertEqual(approved.status_code, 200)
-        self.assertEqual(approved.json()["status"], "Approved")
-        self.assertEqual(approved.json()["approvals"][0]["decision"], "Approved")
+        self.assertEqual(approved.json()["status"], "Pending IT Approval")
+        tower_head_approval = next(
+            item
+            for item in approved.json()["approvals"]
+            if item["stage"] == APPROVAL_STAGE_TOWER_HEAD
+        )
+        self.assertEqual(tower_head_approval["decision"], "Approved")
         self.assertEqual(
             self.db.query(LicenseRequest).one().status,
-            "Approved",
+            "Pending IT Approval",
         )
 
     def test_department_mismatch_and_license_application_mismatch_are_rejected(self):

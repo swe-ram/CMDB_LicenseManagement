@@ -1,12 +1,26 @@
 from sqlalchemy import inspect, text
 
-from database.database import engine, Base
+from database.database import engine, Base, SessionLocal
 from database import models
+from database.approver_repository import ensure_default_approvers
 
 
 print("Creating database tables...")
 
 Base.metadata.create_all(bind=engine)
+
+# Seed the initial two-stage approvers idempotently. Safe to run repeatedly:
+# it never duplicates rows and never removes existing records.
+try:
+    seed_db = SessionLocal()
+    try:
+        ensure_default_approvers(seed_db)
+        seed_db.commit()
+        print("Ensured default Tower Head and IT / License Provisioning approvers.")
+    finally:
+        seed_db.close()
+except Exception as exc:  # pragma: no cover - defensive
+    print(f"Skipped approver seeding: {exc}")
 
 inspector = inspect(engine)
 if inspector.has_table("license_assigned_users"):

@@ -758,3 +758,32 @@ export const decideLicenseRequest = (requestId, decision, comments) => (
     { decision, comments }
   )
 );
+
+// ── Sequential approval workflow ────────────────────────────────────────────
+// Stage identifiers used by the backend two-stage workflow.
+export const APPROVAL_STAGES = {
+  TOWER_HEAD: 'TOWER_HEAD',
+  IT_LICENSE_PROVISIONING: 'IT_LICENSE_PROVISIONING',
+};
+
+export const decideTowerHeadStage = (requestId, decision, comments) => (
+  apiClient.post(
+    `/license-requests/${encodeURIComponent(requestId)}/tower-head/decision`,
+    { decision, comments }
+  )
+);
+
+export const decideProvisioningStage = (requestId, decision, comments) => (
+  apiClient.post(
+    `/license-requests/${encodeURIComponent(requestId)}/it-license-provisioning/decision`,
+    { decision, comments }
+  )
+);
+
+export const getTowerHeadApprover = () => (
+  apiClient.get('/license-requests/approvers/tower-head')
+);
+
+export const getProvisioningApprover = () => (
+  apiClient.get('/license-requests/approvers/it-license-provisioning')
+);

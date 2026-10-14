@@ -8,12 +8,21 @@ from typing import Any
 import jwt
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from database.database import get_db
 
 
 SESSION_COOKIE_NAME = "licensehub_session"
 SESSION_ISSUER = "licensehub"
 SESSION_AUDIENCE = "licensehub-frontend"
 SHARED_ACCOUNT_SUBJECT = "shared-development-account"
+APPROVER_ACCOUNT_TYPE = "approver"
+SHARED_ACCOUNT_TYPE = "shared"
+# Subject prefix for approver sessions. The full subject is
+# ``f"{APPROVER_ACCOUNT_SUBJECT_PREFIX}{email}"`` so each approver has a stable,
+# distinct subject while still being identifiable as an approver account.
+APPROVER_ACCOUNT_SUBJECT_PREFIX = "approver:"
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
@@ -110,7 +119,30 @@ def get_current_principal(
             detail="The LicenseHub session is invalid or expired.",
         ) from exc
 
-    if claims.get("sub") != SHARED_ACCOUNT_SUBJECT or claims.get("account_type") != "shared":
+    account_type = claims.get("account_type")
+    subject = claims.get("sub")
+
+    if account_type == SHARED_ACCOUNT_TYPE:
+        if subject != SHARED_ACCOUNT_SUBJECT:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="The LicenseHub session is invalid.",
+            )
+        object_id = SHARED_ACCOUNT_SUBJECT
+    elif account_type == APPROVER_ACCOUNT_TYPE:
+        # Approver sessions carry a distinct subject of the form
+        # "approver:<email>". The email is also present in preferred_username.
+        if (
+            not isinstance(subject, str)
+            or not subject.startswith(APPROVER_ACCOUNT_SUBJECT_PREFIX)
+            or not claims.get("preferred_username")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="The LicenseHub session is invalid.",
+            )
+        object_id = subject
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="The LicenseHub session is invalid.",
@@ -125,7 +157,7 @@ def get_current_principal(
             detail="The LicenseHub session is invalid.",
         )
     return AuthenticatedPrincipal(
-        object_id=SHARED_ACCOUNT_SUBJECT,
+        object_id=object_id,
         roles=frozenset(token_roles),
         claims=claims,
     )
@@ -144,17 +176,28 @@ def login(
     credentials: LoginCredentials,
     request: Request,
     response: Response,
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     username, password, signing_secret, lifetime_minutes, secure_cookie = _auth_settings()
-    valid_username = hmac.compare_digest(
-        credentials.username.encode("utf-8"),
-        username.encode("utf-8"),
+
+    # Determine whether this is a shared-account login or a configured approver
+    # login. Approvers authenticate with their own email as the username and the
+    # shared portal password. Only configured approver emails are accepted here;
+    # authorization for specific stages is enforced again on the backend.
+    entered_username = credentials.username.strip()
+    is_shared_login = hmac.compare_digest(
+        entered_username.encode("utf-8"), username.encode("utf-8")
     )
     valid_password = hmac.compare_digest(
         credentials.password.encode("utf-8"),
         password.encode("utf-8"),
     )
-    if not (valid_username and valid_password):
+
+    approver_email: str | None = None
+    if not is_shared_login and valid_password:
+        approver_email = _configured_approver_email(db, entered_username)
+
+    if not (valid_password and (is_shared_login or approver_email)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="The username or password is incorrect.",
@@ -166,21 +209,55 @@ def login(
         local_license_request_test_mode_enabled()
         and is_loopback_request(request)
     )
-    token = jwt.encode(
-        {
-            "sub": SHARED_ACCOUNT_SUBJECT,
-            "account_type": "shared",
-            "preferred_username": username,
+
+    if approver_email and not is_shared_login:
+        subject = f"{APPROVER_ACCOUNT_SUBJECT_PREFIX}{approver_email}"
+        token = jwt.encode(
+            {
+                "sub": subject,
+                "account_type": APPROVER_ACCOUNT_TYPE,
+                "preferred_username": approver_email,
+                "roles": [],
+                "iat": now,
+                "exp": expires,
+                "iss": SESSION_ISSUER,
+                "aud": SESSION_AUDIENCE,
+            },
+            signing_secret,
+            algorithm="HS256",
+        )
+        user_payload = {
+            "username": approver_email,
+            "name": approver_email,
             "roles": [],
+            "is_shared_account": False,
+            "account_type": APPROVER_ACCOUNT_TYPE,
+        }
+    else:
+        token = jwt.encode(
+            {
+                "sub": SHARED_ACCOUNT_SUBJECT,
+                "account_type": SHARED_ACCOUNT_TYPE,
+                "preferred_username": username,
+                "roles": [],
+                "license_request_test_mode": request_test_mode,
+                "iat": now,
+                "exp": expires,
+                "iss": SESSION_ISSUER,
+                "aud": SESSION_AUDIENCE,
+            },
+            signing_secret,
+            algorithm="HS256",
+        )
+        user_payload = {
+            "username": username,
+            "name": "Shared development account",
+            "roles": [],
+            "is_shared_account": True,
+            "account_type": SHARED_ACCOUNT_TYPE,
             "license_request_test_mode": request_test_mode,
-            "iat": now,
-            "exp": expires,
-            "iss": SESSION_ISSUER,
-            "aud": SESSION_AUDIENCE,
-        },
-        signing_secret,
-        algorithm="HS256",
-    )
+        }
+
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
@@ -191,15 +268,29 @@ def login(
         httponly=True,
         samesite="strict",
     )
-    return {
-        "user": {
-            "username": username,
-            "name": "Shared development account",
-            "roles": [],
-            "is_shared_account": True,
-            "license_request_test_mode": request_test_mode,
-        }
-    }
+    return {"user": user_payload}
+
+
+def _configured_approver_email(db: Session, entered_username: str) -> str | None:
+    """Return the matching active approver email, or None.
+
+    Used during login to decide whether to issue an approver session. Matches
+    case-insensitively against the configured Tower Head and IT / License
+    Provisioning approver emails.
+    """
+    from database.approver_repository import (
+        get_active_provisioning_approver,
+        get_active_tower_head,
+    )
+
+    entered = entered_username.strip().lower()
+    for approver in (
+        get_active_tower_head(db),
+        get_active_provisioning_approver(db),
+    ):
+        if approver and approver.email.strip().lower() == entered:
+            return approver.email.strip().lower()
+    return None
 
 
 @router.get("/me")
@@ -207,14 +298,21 @@ def get_session(
     request: Request,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
 ) -> dict[str, Any]:
+    is_approver = principal.claims.get("account_type") == APPROVER_ACCOUNT_TYPE
     return {
         "user": {
             "username": principal.claims["preferred_username"],
-            "name": "Shared development account",
+            "name": (
+                principal.claims["preferred_username"]
+                if is_approver
+                else "Shared development account"
+            ),
             "roles": [],
-            "is_shared_account": True,
+            "is_shared_account": not is_approver,
+            "account_type": principal.claims.get("account_type"),
             "license_request_test_mode": (
-                bool(principal.claims.get("license_request_test_mode"))
+                not is_approver
+                and bool(principal.claims.get("license_request_test_mode"))
                 and local_license_request_test_mode_enabled()
                 and is_loopback_request(request)
             ),

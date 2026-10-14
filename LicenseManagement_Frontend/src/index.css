@@ -1314,6 +1314,21 @@ a:hover { color: var(--primary-700); }
   color: var(--danger-600);
 }
 
+.approval-timeline-item.not-started .approval-timeline-icon {
+  color: var(--gray-400);
+}
+
+.request-decision-comment-preview {
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--primary-300, #93c5fd);
+  border-radius: 8px;
+  background: var(--gray-100);
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
 .approval-timeline-item strong {
   display: block;
   color: var(--text-primary);

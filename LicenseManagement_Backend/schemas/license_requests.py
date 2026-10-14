@@ -20,19 +20,39 @@ class ApprovalDecision(BaseModel):
     comments: str | None = Field(default=None, max_length=5000)
 
 
+class StageDecision(BaseModel):
+    """Decision payload for a specific sequential approval stage."""
+
+    decision: Literal["Approved", "Rejected"]
+    comments: str | None = Field(default=None, max_length=5000)
+
+
 class DepartmentApproverAssignment(BaseModel):
     department_id: int = Field(gt=0)
     approver_user_id: int = Field(gt=0)
 
 
+class ApproverConfigRead(BaseModel):
+    """Public representation of a configured workflow approver."""
+
+    id: int
+    name: str
+    email: str
+    role: str
+    is_active: bool
+
+
 class ApprovalRead(BaseModel):
     id: int
     approver_name: str
+    approver_email: str | None = None
     decision: str
     stage: str
+    stage_label: str | None = None
     decision_at: datetime | None
     comments: str | None
     created_at: datetime | None
+    can_decide: bool = False
 
 
 class LicenseRequestRead(BaseModel):
@@ -56,6 +76,11 @@ class LicenseRequestRead(BaseModel):
     requester_identity: str | None = None
     test_mode: bool = False
     can_decide: bool = False
+    # Sequential workflow helper fields (additive; safe for existing clients).
+    current_stage: str | None = None
+    tower_head_status: str | None = None
+    provisioning_status_stage: str | None = None
+    email_notifications: list[dict] = Field(default_factory=list)
 
 
 class LicenseRequestDetail(LicenseRequestRead):

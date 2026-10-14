@@ -13,12 +13,17 @@ import {
 import {
   AlertBanner,
   EmptyState,
+  Modal,
   Spinner,
 } from '../components/ui';
 import {
-  decideLicenseRequest,
+  APPROVAL_STAGES,
+  decideProvisioningStage,
+  decideTowerHeadStage,
   getLicenseRequest,
   getLicenseRequestOptions,
+  getProvisioningApprover,
+  getTowerHeadApprover,
   getLicenseRequests,
   requestLicense,
 } from '../api/services';
@@ -31,12 +36,91 @@ const formatDateTime = (value) => {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
 };
 
-const RequestDetailsDrawer = ({ request, onClose, onDecision }) => {
+// Map a backend stage identifier to its display label and configured approver.
+const STAGE_META = {
+  [APPROVAL_STAGES.TOWER_HEAD]: { label: 'Tower Head', approver: 'Akshayaprasanth' },
+  [APPROVAL_STAGES.IT_LICENSE_PROVISIONING]: {
+    label: 'IT / License Provisioning',
+    approver: 'Jerry Joel',
+  },
+};
+const STAGE_ORDER = [APPROVAL_STAGES.TOWER_HEAD, APPROVAL_STAGES.IT_LICENSE_PROVISIONING];
+
+// Human-readable labels for each approval status value.
+const STATUS_LABELS = {
+  Pending: 'Pending',
+  Approved: 'Approved',
+  Rejected: 'Rejected',
+  'Not Started': 'Not started',
+};
+
+const statusClass = (status) => {
+  const normalized = (status || '').toLowerCase().replace(/\s+/g, '-');
+  if (normalized === 'approved') return 'approved';
+  if (normalized === 'rejected') return 'rejected';
+  if (normalized === 'not-started') return 'not-started';
+  return 'pending';
+};
+
+const statusIcon = (status) => {
+  if (status === 'Approved') return <CheckCircle2 size={18} />;
+  if (status === 'Rejected') return <XCircle size={18} />;
+  return <Clock3 size={18} />;
+};
+
+const statusBadgeClass = (status) => {
+  if (status === 'Approved') return 'badge-success';
+  if (status === 'Rejected') return 'badge-danger';
+  if (status === 'Not Started') return 'badge-neutral';
+  return 'badge-warning';
+};
+
+const DecisionConfirmModal = ({ stage, decision, comments, onCancel, onConfirm, saving }) => {
+  const isApprove = decision === 'Approved';
+  const stageLabel = STAGE_META[stage]?.label || stage;
+  return (
+    <Modal
+      open
+      title={isApprove ? 'Confirm approval' : 'Confirm rejection'}
+      onClose={saving ? undefined : onCancel}
+      maxWidth={460}
+      footer={(
+        <div className="flex gap-8" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn btn-secondary" onClick={onCancel} disabled={saving}>
+            Cancel
+          </button>
+          <button
+            className={`btn ${isApprove ? 'btn-primary' : 'btn-danger'}`}
+            onClick={onConfirm}
+            disabled={saving}
+          >
+            {saving ? 'Saving…' : isApprove ? 'Approve' : 'Reject'}
+          </button>
+        </div>
+      )}
+    >
+      <p style={{ marginTop: 0 }}>
+        {isApprove
+          ? `Approve this request at the ${stageLabel} stage?`
+          : `Reject this request at the ${stageLabel} stage?`}
+      </p>
+      {comments ? (
+        <blockquote className="request-decision-comment-preview">{comments}</blockquote>
+      ) : (
+        <p className="request-workflow-note">No comment will be recorded.</p>
+      )}
+    </Modal>
+  );
+};
+
+const RequestDetailsDrawer = ({ request, onClose, onDecision, stageApprovers = {} }) => {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [decisionComments, setDecisionComments] = useState('');
   const [savingDecision, setSavingDecision] = useState(false);
+  const [pendingDecision, setPendingDecision] = useState(null); // { stage, decision }
 
   const load = useCallback(async () => {
     setError('');
@@ -58,36 +142,98 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision }) => {
     load();
   }, [load]);
 
-  const handleDecision = async (decision) => {
+  const openConfirm = (stage, decision) => {
+    if (savingDecision) return;
+    setError('');
+    setSuccess('');
+    setPendingDecision({ stage, decision });
+  };
+
+  const confirmDecision = async () => {
+    if (!pendingDecision || savingDecision) return;
+    const { stage, decision } = pendingDecision;
     setSavingDecision(true);
     setError('');
+    setSuccess('');
     try {
-      const result = await decideLicenseRequest(
+      const submit =
+        stage === APPROVAL_STAGES.IT_LICENSE_PROVISIONING
+          ? decideProvisioningStage
+          : decideTowerHeadStage;
+      const result = await submit(
         request.request_id,
         decision,
         decisionComments.trim() || undefined
       );
       setDetail(result.data);
       setDecisionComments('');
-      onDecision(result.data);
+      setPendingDecision(null);
+      setSuccess(
+        decision === 'Approved'
+          ? `${STAGE_META[stage]?.label || 'Stage'} approved successfully.`
+          : `${STAGE_META[stage]?.label || 'Stage'} rejected.`
+      );
+      onDecision?.(result.data);
     } catch (decisionError) {
       console.error('Failed to save approval decision:', decisionError);
       setError(
         decisionError.response?.data?.detail
           || 'The approval decision could not be saved.'
       );
+      setPendingDecision(null);
     } finally {
       setSavingDecision(false);
     }
   };
 
-  const approval = detail?.approvals?.find(
-    (item) => item.stage === 'Department / Tower Head Approval'
-  );
-  const approvalIcon = (status) => {
-    if (status === 'Approved' || status === 'Completed') return <CheckCircle2 size={18} />;
-    if (status === 'Rejected') return <XCircle size={18} />;
-    return <Clock3 size={18} />;
+  const approvals = detail?.approvals || [];
+  const stageByKey = approvals.reduce((acc, item) => {
+    acc[item.stage] = item;
+    return acc;
+  }, {});
+
+  const renderStageRow = (stageKey) => {
+    const meta = STAGE_META[stageKey] || { label: stageKey };
+    const approval = stageByKey[stageKey];
+    const status = approval?.decision || 'Not Started';
+    const canDecide = Boolean(approval?.can_decide) && !detail?.test_mode;
+    const decided = status === 'Approved' || status === 'Rejected';
+    return (
+      <li className={`approval-timeline-item ${statusClass(status)}`} key={stageKey}>
+        <span className="approval-timeline-icon">{statusIcon(status)}</span>
+        <div>
+          <strong>{meta.label}</strong>
+          <p>
+            {approval?.approver_name
+              || stageApprovers[stageKey]?.name
+              || meta.approver
+              || 'Approver'}
+            {' · '}
+            {STATUS_LABELS[status] || status}
+          </p>
+          {approval?.decision_at && <time>Decided {formatDateTime(approval.decision_at)}</time>}
+          {approval?.comments && <blockquote>{approval.comments}</blockquote>}
+          {canDecide && !decided && (
+            <div className="flex gap-8" style={{ marginTop: 10 }}>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => openConfirm(stageKey, 'Approved')}
+                disabled={savingDecision}
+              >
+                <CheckCircle2 size={15} /> Approve
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={() => openConfirm(stageKey, 'Rejected')}
+                disabled={savingDecision}
+              >
+                <XCircle size={15} /> Reject
+              </button>
+            </div>
+          )}
+        </div>
+      </li>
+    );
   };
 
   return (
@@ -108,6 +254,7 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision }) => {
         <div className="request-drawer-content">
           {loading && <Spinner size={28} />}
           {error && <AlertBanner type="error" message={error} onDismiss={() => setError('')} />}
+          {success && <AlertBanner type="success" message={success} onDismiss={() => setSuccess('')} />}
           {!loading && detail && (
             <>
               <section className="request-detail-section">
@@ -139,123 +286,78 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision }) => {
                       <time>{formatDateTime(detail.requested_at)}</time>
                     </div>
                   </li>
-                  {approval && (
-                    <li className={`approval-timeline-item ${approval.decision.toLowerCase()}`}>
-                      <span className="approval-timeline-icon">{approvalIcon(approval.decision)}</span>
-                      <div>
-                        <strong>{approval.stage}</strong>
-                        <p>{approval.approver_name} · {approval.decision}</p>
-                        {approval.decision_at && (
-                          <time>{formatDateTime(approval.decision_at)}</time>
-                        )}
-                        {approval.comments && <blockquote>{approval.comments}</blockquote>}
-                      </div>
-                    </li>
-                  )}
-                  {!approval && detail.test_mode && (
-                    <li className="approval-timeline-item pending">
-                      <span className="approval-timeline-icon"><Clock3 size={18} /></span>
-                      <div>
-                        <strong>Tower Head Approval</strong>
-                        <p>Pending · Test workflow preview; no approver decision is recorded.</p>
-                      </div>
-                    </li>
-                  )}
-                  {detail.provisioning_status && (
-                    <li className={`approval-timeline-item ${detail.provisioning_status.toLowerCase().replaceAll(' ', '-')}`}>
-                      <span className="approval-timeline-icon">{approvalIcon(detail.provisioning_status)}</span>
-                      <div>
-                        <strong>IT / License Provisioning</strong>
-                        <p>{detail.provisioning_status}</p>
-                      </div>
-                    </li>
-                  )}
-                  {!detail.provisioning_status && detail.test_mode && (
-                    <li className="approval-timeline-item pending">
-                      <span className="approval-timeline-icon"><Clock3 size={18} /></span>
-                      <div>
-                        <strong>License Provisioning</strong>
-                        <p>Pending · Test workflow preview; provisioning has not started.</p>
-                      </div>
-                    </li>
-                  )}
-                  {detail.status === 'Completed' && (
-                    <li className="approval-timeline-item complete">
-                      <span className="approval-timeline-icon"><CheckCircle2 size={18} /></span>
-                      <div><strong>Request Completed</strong></div>
-                    </li>
+                  {detail.test_mode ? (
+                    <>
+                      <li className="approval-timeline-item pending">
+                        <span className="approval-timeline-icon"><Clock3 size={18} /></span>
+                        <div>
+                          <strong>{STAGE_META[APPROVAL_STAGES.TOWER_HEAD].label}</strong>
+                          <p>Pending · Test workflow preview; no approver decision is recorded.</p>
+                        </div>
+                      </li>
+                      <li className="approval-timeline-item not-started">
+                        <span className="approval-timeline-icon"><Clock3 size={18} /></span>
+                        <div>
+                          <strong>{STAGE_META[APPROVAL_STAGES.IT_LICENSE_PROVISIONING].label}</strong>
+                          <p>Not started · Activates after Tower Head approval.</p>
+                        </div>
+                      </li>
+                    </>
+                  ) : (
+                    STAGE_ORDER.map((stageKey) => renderStageRow(stageKey))
                   )}
                 </ol>
-                {!approval && (
+                {detail.test_mode && (
                   <p className="request-history-empty">
-                    {detail.test_mode
-                      ? 'The timeline stages below are a test preview, not approval history.'
-                      : 'No approval stage is recorded for this request.'}
+                    The timeline stages above are a test preview, not approval history.
                   </p>
                 )}
-                {!detail.provisioning_status && (
-                  !detail.test_mode && (
-                    <p className="request-workflow-note">
-                      IT provisioning is not configured for this request.
-                    </p>
-                  )
-                )}
               </section>
 
-              <section className="request-detail-section">
-                <h3><UserRound size={16} /> Approval History</h3>
-                {detail.approvals?.length ? (
-                  <div className="approval-history-list">
-                    {detail.approvals.map((item) => (
-                      <article className="approval-history-item" key={item.id}>
-                        <div>
-                          <strong>{item.approver_name}</strong>
-                          <span>{item.stage}</span>
-                        </div>
-                        <span className={`badge ${item.decision === 'Rejected' ? 'badge-danger' : item.decision === 'Approved' ? 'badge-success' : 'badge-warning'}`}>
-                          {item.decision}
-                        </span>
-                        {item.decision_at && <time>{formatDateTime(item.decision_at)}</time>}
-                        {item.comments && <p>{item.comments}</p>}
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="request-history-empty">No approval history has been recorded.</p>
-                )}
-              </section>
+              {!detail.test_mode && (
+                <section className="request-detail-section">
+                  <h3><UserRound size={16} /> Decision History</h3>
+                  {approvals.length ? (
+                    <div className="approval-history-list">
+                      {approvals.map((item) => (
+                        <article className="approval-history-item" key={item.id}>
+                          <div>
+                            <strong>{item.approver_name}</strong>
+                            <span>{item.stage_label || STAGE_META[item.stage]?.label || item.stage}</span>
+                          </div>
+                          <span className={`badge ${statusBadgeClass(item.decision)}`}>
+                            {STATUS_LABELS[item.decision] || item.decision}
+                          </span>
+                          {item.decision_at && <time>{formatDateTime(item.decision_at)}</time>}
+                          {item.comments && <p>{item.comments}</p>}
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="request-history-empty">No approval history has been recorded.</p>
+                  )}
+                </section>
+              )}
 
-              {detail.can_decide && (
+              {!detail.test_mode && (
                 <section className="request-detail-section request-approver-actions">
-                  <h3>Approver Actions</h3>
-                  <label className="input-label" htmlFor="approval-comments">Comments (optional)</label>
+                  <h3>Decision comment (optional)</h3>
                   <textarea
                     id="approval-comments"
                     className="input"
                     rows={3}
+                    placeholder="Add context for your decision…"
                     value={decisionComments}
                     onChange={(event) => setDecisionComments(event.target.value)}
                     disabled={savingDecision}
                   />
-                  <div className="flex gap-8" style={{ marginTop: 12 }}>
-                    <button
-                      className="btn btn-primary"
-                      onClick={() => handleDecision('Approved')}
-                      disabled={savingDecision}
-                    >
-                      <CheckCircle2 size={15} /> Approve
-                    </button>
-                    <button
-                      className="btn btn-danger"
-                      onClick={() => handleDecision('Rejected')}
-                      disabled={savingDecision}
-                    >
-                      <XCircle size={15} /> Reject
-                    </button>
-                  </div>
+                  <p className="request-workflow-note">
+                    Use Approve or Reject on the stage above. A confirmation is required before a
+                    decision is submitted, and only the configured approver for that stage can decide.
+                  </p>
                 </section>
               )}
-              {!detail.test_mode && !detail.can_decide && detail.status === 'Pending Approval' && (
+              {!detail.test_mode && detail.status === 'Pending Approval' && (
                 <div className="request-approval-readonly">
                   <AlertCircle size={16} />
                   Only the assigned, authenticated approver can decide this stage.
@@ -265,6 +367,16 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision }) => {
           )}
         </div>
       </aside>
+      {pendingDecision && (
+        <DecisionConfirmModal
+          stage={pendingDecision.stage}
+          decision={pendingDecision.decision}
+          comments={decisionComments.trim()}
+          saving={savingDecision}
+          onCancel={() => (savingDecision ? undefined : setPendingDecision(null))}
+          onConfirm={confirmDecision}
+        />
+      )}
     </div>
   );
 };
@@ -281,6 +393,7 @@ const LicenseRequestsPage = () => {
   const [successMessage, setSuccessMessage] = useState('');
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState(null);
+  const [stageApprovers, setStageApprovers] = useState({});
 
   const loadRequests = useCallback(async () => {
     setError('');
@@ -320,6 +433,23 @@ const LicenseRequestsPage = () => {
       });
 
     loadRequests();
+
+    // Best-effort: load the configured stage approvers for display. 404s (no
+    // approver configured) simply leave the static fallbacks in place.
+    Promise.allSettled([getTowerHeadApprover(), getProvisioningApprover()])
+      .then(([towerHead, provisioning]) => {
+        if (!active) return;
+        setStageApprovers({
+          [APPROVAL_STAGES.TOWER_HEAD]:
+            towerHead.status === 'fulfilled' ? towerHead.value.data : null,
+          [APPROVAL_STAGES.IT_LICENSE_PROVISIONING]:
+            provisioning.status === 'fulfilled' ? provisioning.value.data : null,
+        });
+      })
+      .catch((approverLoadError) => {
+        console.error('Failed to load configured stage approvers:', approverLoadError);
+      });
+
     return () => {
       active = false;
     };
@@ -465,6 +595,7 @@ const LicenseRequestsPage = () => {
           request={selectedRequest}
           onClose={() => setSelectedRequest(null)}
           onDecision={handleDecisionSaved}
+          stageApprovers={stageApprovers}
         />
       )}
     </>

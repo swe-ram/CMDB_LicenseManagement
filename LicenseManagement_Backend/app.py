@@ -292,11 +292,19 @@ from routers.microsoft365 import (
 from routers.slack import (
     router as slack_router,
 )
+from routers.license_requests import (
+    legacy_router as legacy_license_requests_router,
+    router as license_requests_router,
+)
+from auth.session import router as authentication_router
 
 
+app.include_router(authentication_router)
 app.include_router(slack_router)
 
 app.include_router(microsoft365_router)
+app.include_router(license_requests_router)
+app.include_router(legacy_license_requests_router)
 
 
 # ============================================================
@@ -363,22 +371,6 @@ async def get_license_users_direct(license_id: str):
     }
 
 
-@app.post(
-    "/licenses/request",
-    tags=["Licenses"],
-    summary="Submit a license assignment request for a user",
-)
-async def submit_license_request(payload: dict):
-    """
-    Handle license provisioning request submitted from frontend.
-    """
-    return {
-        "success": True,
-        "message": "License request submitted successfully",
-        "data": payload,
-    }
-
-
 # ============================================================
 # RUN APPLICATION DIRECTLY
 # ============================================================
@@ -393,4 +385,3 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
     )
-

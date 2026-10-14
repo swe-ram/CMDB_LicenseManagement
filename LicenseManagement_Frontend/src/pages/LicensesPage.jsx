@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { Badge, Spinner, EmptyState, ProgressBar, Modal, AlertBanner, ToolLogo } from '../components/ui';
 import { mockLicenses } from '../api/mockData';
+import { useAuth } from '../context/AuthContext';
 import {
   getLicenses, createLicense, triggerSync, getLicenseUsers, getAppAssignedUsers,
   getUsers, requestLicense,
@@ -527,7 +528,15 @@ const STANDARD_DEPARTMENTS = [
   'Executive Management',
 ];
 
-const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }) => {
+export const RequestLicenseModal = ({
+  open,
+  licenses,
+  users,
+  onClose,
+  onSubmitSuccess,
+  submitRequest = requestLicense,
+  submissionDisabled = false,
+}) => {
   const [selectedUserKey, setSelectedUserKey] = useState('');
   const [department, setDepartment] = useState('');
   const [isAutoFilledDept, setIsAutoFilledDept] = useState(false);
@@ -536,6 +545,8 @@ const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }
   const [urgency, setUrgency] = useState('Standard');
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const submissionInProgress = React.useRef(false);
+  const idempotencyKey = React.useRef('');
 
   // Deduplicate and sort users
   const userOptions = React.useMemo(() => {
@@ -594,6 +605,7 @@ const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }
 
   const handleSubmit = async (e) => {
     e?.preventDefault();
+    if (submissionDisabled || submissionInProgress.current) return;
     if (!selectedUser) {
       setFormError('Please select a user to request this license for.');
       return;
@@ -614,34 +626,43 @@ const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }
     const chosenLic = (licenses || []).find(
       (l) => String(l.license_id || l.sku_id || l.id) === String(selectedLicenseId)
     );
+    if (!idempotencyKey.current) idempotencyKey.current = crypto.randomUUID();
 
     const payload = {
       user_id: selectedUser.id,
+      idempotency_key: idempotencyKey.current,
       user_name: selectedUser.name,
       user_email: selectedUser.email,
       department: department.trim(),
       application_name: chosenLic?.application_name || 'Application',
-      license_id: chosenLic?.license_id || selectedLicenseId,
+      license_id: chosenLic?.db_license_id || chosenLic?.license_id || selectedLicenseId,
       license_name: chosenLic?.license_name || chosenLic?.product || selectedLicenseId,
+      license_type: chosenLic?.license_type || '',
       business_justification: businessJustification.trim(),
       urgency,
       requested_at: new Date().toISOString(),
     };
 
+    submissionInProgress.current = true;
     setSubmitting(true);
     try {
-      await requestLicense(payload);
-      onSubmitSuccess(payload);
+      const savedRequest = await submitRequest(payload);
+      onSubmitSuccess?.(savedRequest, payload);
       // Reset
       setSelectedUserKey('');
       setDepartment('');
       setSelectedLicenseId('');
       setBusinessJustification('');
       setFormError('');
+      idempotencyKey.current = '';
       onClose();
     } catch (err) {
-      setFormError('Failed to submit license request. Please try again.');
+      setFormError(
+        err.response?.data?.detail
+          || 'Failed to submit license request. Please try again.'
+      );
     } finally {
+      submissionInProgress.current = false;
       setSubmitting(false);
     }
   };
@@ -659,9 +680,17 @@ const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }
           <button className="btn btn-secondary" onClick={onClose} disabled={submitting}>
             Cancel
           </button>
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting}>
+          <button
+            className="btn btn-primary"
+            onClick={handleSubmit}
+            disabled={submitting || submissionDisabled}
+          >
             <Send size={14} />
-            {submitting ? 'Submitting Request...' : 'Submit License Request'}
+            {submissionDisabled
+              ? 'Submission Unavailable'
+              : submitting
+                ? 'Submitting Request...'
+                : 'Submit License Request'}
           </button>
         </>
       }
@@ -698,6 +727,13 @@ const RequestLicenseModal = ({ open, licenses, users, onClose, onSubmitSuccess }
         <div style={{ marginBottom: 14 }}>
           <AlertBanner type="error" message={formError} onDismiss={() => setFormError('')} />
         </div>
+      )}
+
+      {submissionDisabled && (
+        <AlertBanner
+          type="warning"
+          message="This shared account does not identify an employee. Request submission is restricted to an individually authorized account."
+        />
       )}
 
       <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1173,6 +1209,7 @@ const AppHeroCard = ({
 
 // ── Main Licenses Page ────────────────────────────────────────────────────────
 const LicensesPage = () => {
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeAppParam = searchParams.get('app') || 'all';
 
@@ -1249,9 +1286,15 @@ const LicensesPage = () => {
     return list;
   }, [availableUsers, appUserCounts]);
 
-  const handleRequestLicenseSuccess = (details) => {
+  const handleRequestLicenseSuccess = (savedRequest, submittedDetails) => {
+    const details = {
+      ...submittedDetails,
+      user_name: savedRequest.employee_name || submittedDetails.user_name,
+      license_name: savedRequest.license_name || submittedDetails.license_name,
+      department: savedRequest.department || submittedDetails.department,
+    };
     setSuccess(
-      `License request for ${details.user_name} (${details.license_name}) has been submitted successfully for the ${details.department} department.`
+      `License request ${savedRequest.request_id} for ${details.user_name} (${details.license_name}) has been saved for the ${details.department} department.`
     );
     setTimeout(() => setSuccess(''), 5500);
   };
@@ -1857,6 +1900,10 @@ const LicensesPage = () => {
         users={allUsersForRequest}
         onClose={() => setShowRequestModal(false)}
         onSubmitSuccess={handleRequestLicenseSuccess}
+        submissionDisabled={
+          !user?.roles?.includes('License.Requester')
+          && !user?.roles?.includes('License.Admin')
+        }
       />
 
       {/* Add License Modal (Price / Cost fields completely removed) */}

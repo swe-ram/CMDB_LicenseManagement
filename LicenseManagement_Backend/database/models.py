@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Float,
     Text,
+    Index,
     UniqueConstraint,
 )
 
@@ -82,6 +83,10 @@ class Department(Base):
         "User",
         back_populates="department",
     )
+    approver_mapping = relationship(
+        "DepartmentApprover",
+        back_populates="department",
+    )
 
 
 class User(Base):
@@ -114,6 +119,128 @@ class User(Base):
         "Department",
         back_populates="users",
     )
+    submitted_license_requests = relationship(
+        "LicenseRequest",
+        foreign_keys="LicenseRequest.user_id",
+        back_populates="employee",
+    )
+    department_approver_mappings = relationship(
+        "DepartmentApprover",
+        back_populates="employee",
+        foreign_keys="DepartmentApprover.employee_id",
+    )
+
+
+class DepartmentApprover(Base):
+    __tablename__ = "department_approvers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    department_id = Column(
+        Integer,
+        ForeignKey("departments.id"),
+        nullable=False,
+        index=True,
+    )
+    employee_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+    approver_name = Column(String(255), nullable=False)
+    approver_email = Column(String(255))
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+    department = relationship("Department", back_populates="approver_mapping")
+    employee = relationship(
+        "User",
+        back_populates="department_approver_mappings",
+        foreign_keys=[employee_id],
+    )
+    approvals = relationship("LicenseApproval", back_populates="approver")
+
+
+class LicenseRequest(Base):
+    __tablename__ = "license_requests"
+    __table_args__ = (
+        Index("uq_license_requests_request_number", "request_number", unique=True),
+        Index(
+            "uq_license_requests_employee_idempotency",
+            "employee_id",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column("request_number", String(64), nullable=False)
+    idempotency_key = Column(String(64))
+    user_id = Column("employee_id", Integer, ForeignKey("users.id"), nullable=False, index=True)
+    department_id = Column(
+        Integer,
+        ForeignKey("departments.id"),
+        nullable=False,
+        index=True,
+    )
+    license_id = Column(Integer, ForeignKey("licenses.id"), nullable=False, index=True)
+    approver_id = Column(
+        Integer,
+        ForeignKey("department_approvers.id"),
+        nullable=True,
+        index=True,
+    )
+    business_justification = Column(Text, nullable=False)
+    urgency = Column(String(64), nullable=False, default="Standard")
+    status = Column(String(30), default="Pending Approval", index=True)
+    requested_at = Column("submission_timestamp", DateTime, default=datetime.utcnow)
+    provisioning_status = Column(String(50))
+    failure_details = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    requested_duration = Column(String(50))
+    requester_identity = Column(String(255))
+
+    employee = relationship("User", foreign_keys=[user_id], back_populates="submitted_license_requests")
+    department = relationship("Department")
+    license = relationship("License")
+    approver = relationship("DepartmentApprover", foreign_keys=[approver_id])
+    approvals = relationship(
+        "LicenseApproval",
+        back_populates="request",
+        order_by="LicenseApproval.created_at",
+    )
+
+
+class LicenseApproval(Base):
+    __tablename__ = "license_approvals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(
+        Integer,
+        ForeignKey("license_requests.id"),
+        nullable=False,
+        index=True,
+    )
+    approver_id = Column(
+        Integer,
+        ForeignKey("department_approvers.id"),
+        nullable=False,
+        index=True,
+    )
+    status = Column("decision", String(20), nullable=False, default="Pending", index=True)
+    comments = Column(Text)
+    decision_at = Column("decision_timestamp", DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime)
+
+    request = relationship("LicenseRequest", back_populates="approvals")
+    approver = relationship("DepartmentApprover", back_populates="approvals")
+
+    @property
+    def stage(self) -> str:
+        return "Department / Tower Head Approval"
 
 
 class LicenseAssignment(Base):

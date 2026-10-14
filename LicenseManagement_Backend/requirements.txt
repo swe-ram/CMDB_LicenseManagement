@@ -5,3 +5,4 @@ python-dotenv
 pydantic
 sqlalchemy
 psycopg2-binary
+PyJWT[crypto]>=2.8,<3

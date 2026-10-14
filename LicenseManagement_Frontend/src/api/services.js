@@ -1,13 +1,12 @@
 import axios from 'axios';
+import apiClient from './client';
 import { normalizeMicrosoftLicense } from './microsoftSkus';
 import {
   mockSummary,
   mockUtilization,
   mockExpiring,
-  mockApplications,
   mockLicenses,
   mockUsers,
-  mockSyncJobs,
 } from './mockData';
 
 // Direct axios instance for root endpoints (/microsoft365, /slack, /health)
@@ -739,16 +738,23 @@ export const triggerSync = async (applicationId) => {
 
 // ── License Request ──────────────────────────────────────────────────────────
 export const requestLicense = async (requestData) => {
-  try {
-    const res = await rawClient.post('/licenses/request', requestData);
-    return res.data;
-  } catch (err) {
-    console.warn('Backend /licenses/request returned error, falling back locally:', err);
-    return {
-      success: true,
-      message: 'License request submitted successfully.',
-      data: requestData,
-    };
-  }
+  const res = await apiClient.post('/license-requests', requestData);
+  return res.data;
 };
 
+export const getLicenseRequestOptions = () => (
+  apiClient.get('/license-requests/options')
+);
+
+export const getLicenseRequests = () => apiClient.get('/license-requests');
+
+export const getLicenseRequest = (requestId) => (
+  apiClient.get(`/license-requests/${encodeURIComponent(requestId)}`)
+);
+
+export const decideLicenseRequest = (requestId, decision, comments) => (
+  apiClient.post(
+    `/license-requests/${encodeURIComponent(requestId)}/decision`,
+    { decision, comments }
+  )
+);

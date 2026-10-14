@@ -303,5 +303,83 @@ class LicenseRequestApiTests(unittest.TestCase):
             self.assertEqual(disabled.status_code, 403)
 
 
+class UnauthenticatedAccessTests(unittest.TestCase):
+    """License request endpoints must return JSON errors without a session.
+
+    Regression coverage for the production incident where errors reached the
+    frontend as plain-text 500 responses, so the UI could not surface the
+    backend's ``detail`` message and showed only a generic failure.
+    """
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False)
+        self.db = self.Session()
+        app.dependency_overrides[get_db] = self._get_db
+        self.client = TestClient(
+            app, client=("127.0.0.1", 50001), raise_server_exceptions=False
+        )
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+        self.db.close()
+        Base.metadata.drop_all(self.engine)
+        self.engine.dispose()
+
+    def _get_db(self):
+        yield self.db
+
+    def test_list_requires_authentication(self):
+        response = self.client.get("/api/v1/license-requests")
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("detail", response.json())
+
+    def test_create_requires_authentication(self):
+        response = self.client.post("/api/v1/license-requests", json={})
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("detail", response.json())
+
+    def test_options_requires_authentication(self):
+        response = self.client.get("/api/v1/license-requests/options")
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("detail", response.json())
+
+    def test_unhandled_errors_return_json_500(self):
+        """A crash inside the list endpoint must still produce JSON detail.
+
+        The internal exception text must not leak to the client; the full
+        traceback stays in the server logs.
+        """
+        from routers import license_requests as license_requests_router
+
+        app.dependency_overrides[get_current_principal] = (
+            lambda: AuthenticatedPrincipal(
+                object_id="employee-oid",
+                roles=frozenset({"License.Requester"}),
+                claims={},
+            )
+        )
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("internal database failure")
+
+        with patch.object(
+            license_requests_router,
+            "_identity_user_ids",
+            side_effect=_boom,
+        ):
+            response = self.client.get("/api/v1/license-requests")
+
+        self.assertEqual(response.status_code, 500)
+        body = response.json()
+        self.assertIn("detail", body)
+        self.assertNotIn("internal database failure", body["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

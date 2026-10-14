@@ -18,6 +18,7 @@ import {
 import {
   formatDate, formatNumber, formatPercent, capitalize, daysUntil, getExpiryUrgency, getUtilizationLevel,
 } from '../utils/formatters';
+import { formatApiError } from '../utils/apiErrors';
 
 const CATEGORY_ICONS = {
   'Business Suite': ShieldCheck,
@@ -657,9 +658,9 @@ export const RequestLicenseModal = ({
       idempotencyKey.current = '';
       onClose();
     } catch (err) {
+      console.error('Failed to submit license request:', err);
       setFormError(
-        err.response?.data?.detail
-          || 'Failed to submit license request. Please try again.'
+        formatApiError(err, 'Failed to submit license request. Please try again.')
       );
     } finally {
       submissionInProgress.current = false;

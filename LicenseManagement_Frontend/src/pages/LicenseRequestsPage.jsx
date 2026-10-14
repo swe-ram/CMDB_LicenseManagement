@@ -29,6 +29,7 @@ import {
 } from '../api/services';
 import { useAuth } from '../context/AuthContext';
 import { RequestLicenseModal } from './LicensesPage';
+import { formatApiError } from '../utils/apiErrors';
 
 const formatDateTime = (value) => {
   if (!value) return '—';
@@ -130,8 +131,7 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision, stageApprovers = {
     } catch (loadError) {
       console.error('Failed to load license request detail:', loadError);
       setError(
-        loadError.response?.data?.detail
-          || 'Unable to load this request. Check your access and try again.'
+        formatApiError(loadError, 'Unable to load this request. Check your access and try again.')
       );
     } finally {
       setLoading(false);
@@ -177,8 +177,7 @@ const RequestDetailsDrawer = ({ request, onClose, onDecision, stageApprovers = {
     } catch (decisionError) {
       console.error('Failed to save approval decision:', decisionError);
       setError(
-        decisionError.response?.data?.detail
-          || 'The approval decision could not be saved.'
+        formatApiError(decisionError, 'The approval decision could not be saved.')
       );
       setPendingDecision(null);
     } finally {
@@ -403,8 +402,7 @@ const LicenseRequestsPage = () => {
     } catch (loadError) {
       console.error('Failed to load license requests:', loadError);
       setError(
-        loadError.response?.data?.detail
-          || 'Unable to load license requests. Verify your access and try again.'
+        formatApiError(loadError, 'Unable to load license requests. Verify your access and try again.')
       );
     } finally {
       setLoading(false);
@@ -423,8 +421,10 @@ const LicenseRequestsPage = () => {
         console.error('Failed to load authenticated request options:', optionsLoadError);
         if (active) {
           setOptionsError(
-            optionsLoadError.response?.data?.detail
-              || 'Unable to load request options for the authenticated employee.'
+            formatApiError(
+              optionsLoadError,
+              'Unable to load request options for the authenticated employee.'
+            )
           );
         }
       })
